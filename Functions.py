@@ -1,3 +1,49 @@
+import pandas as pd
+from typing import Tuple, Dict
+
+def read_portfolio(data: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
+    import yfinance as yf
+    """
+    Parameters:
+        data : pd.DataFrame
+            A pandas DataFrame containing stock portfolio data. It must include a column 
+            named 'symbol' with the stock ticker symbols.
+    """
+    tickers = {}
+    
+    for _, x in data.iterrows():
+        tickers[x.symbol] = yf.Ticker(x.symbol)
+
+    data['sector'] = data['symbol'].apply(lambda x : tickers.get(x).info.get('sector'))
+
+    data['industry'] = data['symbol'].apply(lambda x : tickers.get(x).info.get('industry'))
+
+    data['current'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('current'))
+
+    data['investment_value'] = data['current'] * data['shares']
+
+    data['low'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('low'))
+
+    data['high'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('high'))
+
+    data['mean'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('mean'))
+
+    data['median'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('median'))
+
+    data['strongBuy'] = data['symbol'].apply(lambda x: tickers.get(x).recommendations_summary.iloc[0]['strongBuy'])
+
+    data['buy'] = data['symbol'].apply(lambda x: tickers.get(x).recommendations_summary.iloc[0]['buy'])
+
+    data['hold'] = data['symbol'].apply(lambda x: tickers.get(x).recommendations_summary.iloc[0]['hold'])
+
+    data['sell'] = data['symbol'].apply(lambda x: tickers.get(x).recommendations_summary.iloc[0]['sell'])
+
+    data['strongSell'] = data['symbol'].apply(lambda x: tickers.get(x).recommendations_summary.iloc[0]['strongSell'])
+
+    data['cik'] = data['symbol'].apply(lambda x : get_cik_from_symbol(x))
+
+    return data, tickers
+
 def get_cik_from_symbol(symbol: str) -> str:
     import requests
     import os
@@ -66,7 +112,7 @@ def get_company_facts(cik: str, symbol: str) -> dict:
         file_path = f"companiesFacts/{symbol}.json"
         if os.path.exists(file_path):
             file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-            if datetime.now() - file_mod_time < timedelta(days=1):
+            if datetime.now() - file_mod_time < timedelta(days=10):
                 with open(file_path, 'r') as file:
                     return json.load(file)
 
