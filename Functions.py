@@ -1,5 +1,9 @@
 import pandas as pd
 from typing import Tuple, Dict
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+pio.templates.default = "plotly_dark"
 
 def read_portfolio(data: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     import yfinance as yf
@@ -43,6 +47,17 @@ def read_portfolio(data: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     data['cik'] = data['symbol'].apply(lambda x : get_cik_from_symbol(x))
 
     return data, tickers
+
+def get_metrics(tickers: dict, metrics: list) -> pd.DataFrame:
+    import yfinance as yf
+    data = []
+    for symbol, ticker in tickers.items():
+        temp = []
+        temp.append(symbol)
+        for metric in metrics:
+            temp.append(ticker.info[metric])
+        data.append(temp)
+    return pd.DataFrame(data, columns=['symbol', *metrics])
 
 def get_cik_from_symbol(symbol: str) -> str:
     """
@@ -198,25 +213,31 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
         company_facts (dict): A dictionary containing financial data for a company, structured
                               as per the SEC EDGAR API's `companyfacts` endpoint.
     """
-
-    company_facts_df = pd.DataFrame(company_facts['facts']['us-gaap'][fact]['units']['USD'])
+    company_facts_df = None
+    per_share = False
+    if 'USD' in company_facts['facts']['us-gaap'][fact]['units'].keys():
+        company_facts_df = pd.DataFrame(company_facts['facts']['us-gaap'][fact]['units']['USD'])
+    else:
+        company_facts_df = pd.DataFrame(company_facts['facts']['us-gaap'][fact]['units']['USD/shares'])
+        per_share = True
+    
     company_facts_df['start'] = pd.to_datetime(company_facts_df['start'])
     company_facts_df['end'] = pd.to_datetime(company_facts_df['end'])
     company_facts_df['diff'] = company_facts_df['end'] - company_facts_df['start']
 
     annual_facts = company_facts_df[company_facts_df['form'] == '10-K']
-    annual_facts = annual_facts.sort_values(by=['start', 'filed'], ascending=[True, False])
+    annual_facts = annual_facts.sort_values(by=['end', 'filed'], ascending=[True, False])
 
     quarter_facts = company_facts_df[company_facts_df['form'] == '10-Q']
     quarter_facts = quarter_facts.sort_values(by=['end', 'filed'], ascending=[True, False])
 
     annual_data = {
         'Date': [],
-        'Value': []
+        fact: []
     }
     quarter_data = {
         'Date': [],
-        'Value': []
+        fact: []
     }
 
     year_idx = {}
@@ -229,7 +250,7 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
             continue
         elif row['diff'].days >= 363:
             annual_data['Date'].append(row['end'])
-            annual_data['Value'].append(row['val'])
+            annual_data[fact].append(row['val'])
             annual_obtained.add(row['end'])
             year_idx[row['end'].year] = counter
             counter += 1
@@ -240,7 +261,7 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
             continue
         elif row['diff'].days >= 89 and row['diff'].days <= 91:
             quarter_data['Date'].append(row['end'])
-            quarter_data['Value'].append(row['val'])
+            quarter_data[fact].append(row['val'])
             quarter_obtained.add(row['end'])
 
 
@@ -248,7 +269,7 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
     annual_data['Date'] = pd.to_datetime(annual_data['Date'])
     annual_data = annual_data.set_index('Date')
 
-    quarter_data = pd.DataFrame(quarter_data, columns=['Date', 'Value'])
+    quarter_data = pd.DataFrame(quarter_data, columns=['Date', fact])
     quarter_data['Date'] = pd.to_datetime(quarter_data['Date'])
     quarter_data = quarter_data.set_index('Date')
 
@@ -257,19 +278,38 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
     for row in quarter_data.index:
         if row.year == prev:
             counter += 1
-            sum += quarter_data.loc[row]['Value']
+            sum += quarter_data.loc[row][fact]
         else:
             prev = row.year
-            sum, counter = quarter_data.loc[row]['Value'], 1
+            sum, counter = quarter_data.loc[row][fact], 1
         if counter == 3:
             if len(annual_data[annual_data.index >= row]) > 0:
-                value = annual_data[annual_data.index >= row].iloc[0]['Value']
+                value = annual_data[annual_data.index >= row].iloc[0][fact]
                 time = annual_data[annual_data.index >= row].iloc[0].name
                 quarter_data.loc[time] = value - sum
             sum, counter = 0, 0
+
     quarter_data = quarter_data.sort_index()
+    
+    if not per_share:
+        quarter_data[fact] = quarter_data[fact].apply(lambda x: f"{x:.0f}")
+        annual_data[fact] = annual_data[fact].apply(lambda x: f"{x:.0f}")
 
     return (quarter_data, annual_data)
+
+def get_all_facts(company_facts: dict) -> Tuple[pd.DataFrame, pd.DataFrame, list]:
+    quarter_data, annual_data, specialCase= [], [], []
+    for fact in company_facts['facts']['us-gaap'].keys():
+        try:
+            q, a = get_fact(company_facts, fact)
+        except Exception as e:
+            specialCase.append((fact, str(e)))
+            continue
+        quarter_data.append(q)
+        annual_data.append(a)
+    quarter_data = pd.concat(quarter_data, axis=1)
+    annual_data = pd.concat(annual_data, axis=1)
+    return quarter_data, annual_data, specialCase
 
 def get_news_content(link: str) -> str:
     """
@@ -302,7 +342,60 @@ def get_news_content(link: str) -> str:
     except Exception as e:
         return f"An unexpected error occurred: {e}"
 
+def line_and_bar(chart_name: str, values_index: pd.Index, values: pd.Series, history_price_index: pd.Index, history_price_open: pd.Series, percentage: bool = False) -> go.Figure:
+    """
+    The function generates a dual-axis chart that combines a bar chart and a line chart using Plotly's go.Figure. 
+    It is particularly useful for comparing two data series, 
+    such as annual revenues (or percentages) and historical stock prices, over the same time period.
+    """
+    bar_chart = None
 
+    if percentage:
+        bar_chart = go.Bar(x=values_index, y=values, name='Bar Data', hovertemplate='%{y:.2f}%<extra></extra>')
+    else:
+        bar_chart = go.Bar(x=values_index, y=values, name='Bar Data')
 
+    line_chart = go.Scatter(x=history_price_index, y=history_price_open, name='Line Data', mode='lines+markers', yaxis='y2')
 
+    fig = go.Figure(data=[line_chart, bar_chart])
+
+    fig.update_layout(
+        title= chart_name,
+        xaxis_title="Time",
+        yaxis_title="Values",
+        yaxis2=dict(
+            title="Stock Price",
+            overlaying="y",
+            side="right"
+        ),
+        legend_title="Legend",
+    )
+    return fig
+
+def bar_chart(title: str, df: pd.DataFrame, y: str) -> px.bar:
+    """
+    The function returns a bar chart with the title for companies.
+    It takes title, dataframe, and variable to create the bar
+    """
+    bar = px.bar(df, x='symbol', y=y, title=title, 
+                 color='symbol', labels={'symbol': 'Compnay Symbol', y: 'Value'})
+
+    bar.update_layout(
+        legend_title_text="Symbols",
+        xaxis_title="Company Symbols",
+        yaxis_title="Values"
+    )
+    
+    return bar
+
+def calculate_difference(data: pd.Series) -> pd.DataFrame:
+    """
+    The function calculates the difference and the percentage change between consecutive values in a pandas Series. 
+    It returns the results as a pandas DataFrame with two columns: 'Difference' and 'PercentageChange'.
+    """
+    difference = pd.DataFrame()
+    difference['Difference'] = data.diff()
+    difference['PercentageChange'] = difference['Difference'] / data.shift(1) * 100
+
+    return difference
 
