@@ -44,8 +44,6 @@ def read_portfolio(data: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
 
     data['strongSell'] = data['symbol'].apply(lambda x: tickers.get(x).recommendations_summary.iloc[0]['strongSell'])
 
-    data['cik'] = data['symbol'].apply(lambda x : get_cik_from_symbol(x))
-
     return data, tickers
 
 def get_metrics(tickers: dict, metrics: list) -> pd.DataFrame:
@@ -205,7 +203,7 @@ def get_company_facts(cik: str, symbol: str) -> dict:
     except Exception as e:
         return {"error": f"An unexpected error occurred: {e}"}
 
-def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def get_fact(company_facts: dict, fact: str, annual_form: str = "10-K", quarter_form: str = "10-Q") -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Extracts and organizes quarterly and annual revenue data from a company's financial facts.
 
@@ -214,21 +212,20 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
                               as per the SEC EDGAR API's `companyfacts` endpoint.
     """
     company_facts_df = None
+    type_of_fact = list(company_facts['facts']['us-gaap'][fact]['units'].keys())[0]
+    company_facts_df = pd.DataFrame(company_facts['facts']['us-gaap'][fact]['units'][type_of_fact])
     per_share = False
-    if 'USD' in company_facts['facts']['us-gaap'][fact]['units'].keys():
-        company_facts_df = pd.DataFrame(company_facts['facts']['us-gaap'][fact]['units']['USD'])
-    else:
-        company_facts_df = pd.DataFrame(company_facts['facts']['us-gaap'][fact]['units']['USD/shares'])
+    if type_of_fact == 'USD/shares':
         per_share = True
     
     company_facts_df['start'] = pd.to_datetime(company_facts_df['start'])
     company_facts_df['end'] = pd.to_datetime(company_facts_df['end'])
     company_facts_df['diff'] = company_facts_df['end'] - company_facts_df['start']
 
-    annual_facts = company_facts_df[company_facts_df['form'] == '10-K']
+    annual_facts = company_facts_df[company_facts_df['form'] == annual_form]
     annual_facts = annual_facts.sort_values(by=['end', 'filed'], ascending=[True, False])
 
-    quarter_facts = company_facts_df[company_facts_df['form'] == '10-Q']
+    quarter_facts = company_facts_df[company_facts_df['form'] == quarter_form]
     quarter_facts = quarter_facts.sort_values(by=['end', 'filed'], ascending=[True, False])
 
     annual_data = {
@@ -273,23 +270,24 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
     quarter_data['Date'] = pd.to_datetime(quarter_data['Date'])
     quarter_data = quarter_data.set_index('Date')
 
-    sum, counter = 0, 0
-    prev = quarter_data.index[0].year
-    for row in quarter_data.index:
-        if row.year == prev:
-            counter += 1
-            sum += quarter_data.loc[row][fact]
-        else:
-            prev = row.year
-            sum, counter = quarter_data.loc[row][fact], 1
-        if counter == 3:
-            if len(annual_data[annual_data.index >= row]) > 0:
-                value = annual_data[annual_data.index >= row].iloc[0][fact]
-                time = annual_data[annual_data.index >= row].iloc[0].name
-                quarter_data.loc[time] = value - sum
-            sum, counter = 0, 0
+    if len(quarter_data) > 0:
+        sum, counter = 0, 0
+        prev = quarter_data.index[0].year
+        for row in quarter_data.index:
+            if row.year == prev:
+                counter += 1
+                sum += quarter_data.loc[row][fact]
+            else:
+                prev = row.year
+                sum, counter = quarter_data.loc[row][fact], 1
+            if counter == 3:
+                if len(annual_data[annual_data.index >= row]) > 0:
+                    value = annual_data[annual_data.index >= row].iloc[0][fact]
+                    time = annual_data[annual_data.index >= row].iloc[0].name
+                    quarter_data.loc[time] = value - sum
+                sum, counter = 0, 0
 
-    quarter_data = quarter_data.sort_index()
+        quarter_data = quarter_data.sort_index()
     
     if not per_share:
         quarter_data[fact] = quarter_data[fact].apply(lambda x: f"{x:.0f}")
@@ -297,19 +295,147 @@ def get_fact(company_facts: dict, fact: str) -> Tuple[pd.DataFrame, pd.DataFrame
 
     return (quarter_data, annual_data)
 
+def get_special_fact(company_facts: dict, fact: str, annual_form: str = "10-K", quarter_form: str = "10-Q" ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    company_facts_df = None
+    type_of_fact = list(company_facts['facts']['us-gaap'][fact]['units'].keys())[0]
+    company_facts_df = pd.DataFrame(company_facts['facts']['us-gaap'][fact]['units'][type_of_fact])
+    per_share = False
+    if type_of_fact == 'USD/shares':
+        per_share = True
+
+    company_facts_df['end'] = pd.to_datetime(company_facts_df['end'])
+
+    annual_facts = company_facts_df[company_facts_df['form'] == annual_form]
+    annual_facts = annual_facts.sort_values(by=['end', 'filed'], ascending=[True, False])
+
+    quarter_facts = company_facts_df[company_facts_df['form'] == quarter_form]
+    quarter_facts = quarter_facts.sort_values(by=['end', 'filed'], ascending=[True, False])
+
+    annual_data = {
+        'Date': [],
+        fact: []
+    }
+    quarter_data = {
+        'Date': [],
+        fact: []
+    }
+    year_idx = {}
+
+    annual_obtained = set()
+    quarter_obtained = set()
+    counter = 0
+    for _, row in annual_facts.iterrows():
+        if row['end'] in annual_obtained:
+            continue
+        annual_data['Date'].append(row['end'])
+        annual_data[fact].append(row['val'])
+        annual_obtained.add(row['end'])
+        year_idx[row['end'].year] = counter
+        counter += 1
+
+
+    for _, row in quarter_facts.iterrows():
+        if row['end'] in quarter_obtained:
+            continue
+        quarter_data['Date'].append(row['end'])
+        quarter_data[fact].append(row['val'])
+        quarter_obtained.add(row['end'])
+
+
+    annual_data = pd.DataFrame(annual_data)
+    annual_data['Date'] = pd.to_datetime(annual_data['Date'])
+    annual_data = annual_data.set_index('Date')
+
+    quarter_data = pd.DataFrame(quarter_data, columns=['Date', fact])
+    quarter_data['Date'] = pd.to_datetime(quarter_data['Date'])
+    quarter_data = quarter_data.set_index('Date')
+
+    if len(quarter_data) > 0:
+        sum, counter = 0, 0
+        prev = quarter_data.index[0].year
+        for row in quarter_data.index:
+            if row.year == prev:
+                counter += 1
+                sum += quarter_data.loc[row][fact]
+            else:
+                prev = row.year
+                sum, counter = quarter_data.loc[row][fact], 1
+            if counter == 3:
+                if len(annual_data[annual_data.index >= row]) > 0:
+                    value = annual_data[annual_data.index >= row].iloc[0][fact]
+                    time = annual_data[annual_data.index >= row].iloc[0].name
+                    quarter_data.loc[time] = value - sum
+                sum, counter = 0, 0
+
+        quarter_data = quarter_data.sort_index()
+    
+    if not per_share:
+        quarter_data[fact] = quarter_data[fact].apply(lambda x: f"{x:.0f}")
+        annual_data[fact] = annual_data[fact].apply(lambda x: f"{x:.0f}")
+
+    return (quarter_data, annual_data)
+
+def get_recent_fact_from_symbol(symbol: str, fact: str, annual: bool = True, annual_form: str = "10-K", quarter_form: str = "10-Q" ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Retrieves most reacet quarter or annual data for a specific financial fact based on a stock symbol.
+    """
+    cik = get_cik_from_symbol(symbol)
+    company_facts = get_company_facts(cik, symbol)
+    try:
+        quarter_data, annual_data = get_fact(company_facts, fact, annual_form, quarter_form)
+    except Exception as e:
+        quarter_data, annual_data = get_special_fact(company_facts, fact, annual_form, quarter_form)
+    if annual:
+        return annual_data[fact].iloc[-1]
+    else:
+        return quarter_data[fact].iloc[-1]
+
 def get_all_facts(company_facts: dict) -> Tuple[pd.DataFrame, pd.DataFrame, list]:
+    """
+    Retrieves all available financial facts for a company, organizing them into quarterly and annual data.
+
+    Parameters:
+    ----------
+    company_facts : dict
+        A dictionary containing the financial data for a company.
+
+    Returns:
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame, list]
+        - quarter_data: A DataFrame of all quarterly financial data.
+        - annual_data: A DataFrame of all annual financial data.
+        - specialCase: A list of facts requiring special handling, including error messages.
+    """
     quarter_data, annual_data, specialCase= [], [], []
     for fact in company_facts['facts']['us-gaap'].keys():
         try:
             q, a = get_fact(company_facts, fact)
         except Exception as e:
             specialCase.append((fact, str(e)))
-            continue
+            q, a = get_special_fact(company_facts, fact)
         quarter_data.append(q)
         annual_data.append(a)
     quarter_data = pd.concat(quarter_data, axis=1)
     annual_data = pd.concat(annual_data, axis=1)
     return quarter_data, annual_data, specialCase
+
+def get_description(company_facts: dict, fact: str) -> str:
+    """
+    Retrieves the description of a specific financial fact.
+
+    Parameters:
+    ----------
+    company_facts : dict
+        A dictionary containing the financial data for a company.
+    fact : str
+        The financial fact whose description is to be retrieved.
+
+    Returns:
+    -------
+    str
+        A description of the specified financial fact.
+    """
+    return company_facts['facts']['us-gaap'][fact]['description']
 
 def get_news_content(link: str) -> str:
     """
@@ -341,6 +467,94 @@ def get_news_content(link: str) -> str:
         return f"An error occurred while accessing the news link: {e}"
     except Exception as e:
         return f"An unexpected error occurred: {e}"
+
+def get_income_stmt(tickers: dict, indicators: list = None) -> pd.DataFrame:
+    """
+    Extracts and organizes cash flow data for multiple stock tickers into a pandas DataFrame.
+
+    This function processes cash flow data for various indicators, aligning them for all provided tickers. 
+    Missing values for some indicators in specific tickers are padded with NaN. Additionally, the function 
+    supports filtering to include only specified indicators.
+    """
+    import numpy as np
+
+    stocks_cash_flow = {"symbol": [], "year": []}
+    for idx, (symbol, ticker) in enumerate(tickers.items()):
+        cash_flow = ticker.income_stmt
+        stocks_cash_flow["year"].append(cash_flow.columns[0])
+        cash_flow = cash_flow[cash_flow.columns[0]]
+        stocks_cash_flow["symbol"].append(symbol)
+        for indicator, val in cash_flow.items():
+            if indicator not in stocks_cash_flow.keys():
+                stocks_cash_flow[indicator] = [val] if idx == 0 else [np.nan] * idx
+                if idx != 0:
+                    stocks_cash_flow[indicator].append(val)
+            else:
+                if len(stocks_cash_flow[indicator]) != idx:
+                    padding = [np.nan] * (idx - len(stocks_cash_flow[indicator]))
+                    stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + [np.nan]
+                    stocks_cash_flow[indicator].append(val)
+                else:
+                    stocks_cash_flow[indicator].append(val)
+
+    for indicator in stocks_cash_flow.keys():
+        if len(stocks_cash_flow[indicator]) != len(tickers.keys()):
+            padding = [np.nan] * (len(tickers.keys()) - len(stocks_cash_flow[indicator]))
+            stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + padding
+    df = pd.DataFrame(stocks_cash_flow)
+
+    if indicators:
+        drops = []
+        for column in df.columns:
+            if column not in indicators:
+                drops.append(column)
+        df = df.drop(drops, axis=1)
+
+    return df
+
+def get_cash_flow(tickers: dict, indicators: list = None) -> pd.DataFrame:
+    """
+    Extracts and organizes cash flow data for multiple stock tickers into a pandas DataFrame.
+
+    This function processes cash flow data for various indicators, aligning them for all provided tickers. 
+    Missing values for some indicators in specific tickers are padded with NaN. Additionally, the function 
+    supports filtering to include only specified indicators.
+    """
+    import numpy as np
+
+    stocks_cash_flow = {"symbol": [], "year": []}
+    for idx, (symbol, ticker) in enumerate(tickers.items()):
+        cash_flow = ticker.cash_flow
+        stocks_cash_flow["year"].append(cash_flow.columns[0])
+        cash_flow = cash_flow[cash_flow.columns[0]]
+        stocks_cash_flow["symbol"].append(symbol)
+        for indicator, val in cash_flow.items():
+            if indicator not in stocks_cash_flow.keys():
+                stocks_cash_flow[indicator] = [val] if idx == 0 else [np.nan] * idx
+                if idx != 0:
+                    stocks_cash_flow[indicator].append(val)
+            else:
+                if len(stocks_cash_flow[indicator]) != idx:
+                    padding = [np.nan] * (idx - len(stocks_cash_flow[indicator]))
+                    stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + [np.nan]
+                    stocks_cash_flow[indicator].append(val)
+                else:
+                    stocks_cash_flow[indicator].append(val)
+
+    for indicator in stocks_cash_flow.keys():
+        if len(stocks_cash_flow[indicator]) != len(tickers.keys()):
+            padding = [np.nan] * (len(tickers.keys()) - len(stocks_cash_flow[indicator]))
+            stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + padding
+    df = pd.DataFrame(stocks_cash_flow)
+
+    if indicators:
+        drops = []
+        for column in df.columns:
+            if column not in indicators:
+                drops.append(column)
+        df = df.drop(drops, axis=1)
+
+    return df
 
 def line_and_bar(chart_name: str, values_index: pd.Index, values: pd.Series, history_price_index: pd.Index, history_price_open: pd.Series, percentage: bool = False) -> go.Figure:
     """
