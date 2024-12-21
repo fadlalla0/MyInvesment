@@ -3,6 +3,7 @@ from typing import Tuple, Dict
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
+from headers import headers
 pio.templates.default = "plotly_dark"
 
 def read_portfolio(data: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
@@ -26,13 +27,13 @@ def read_portfolio(data: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
 
     data['investment_value'] = data['current'] * data['shares']
 
-    data['low'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('low'))
+    data['price_target_low'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('low'))
 
-    data['high'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('high'))
+    data['price_target_high'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('high'))
 
-    data['mean'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('mean'))
+    data['price_target_mean'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('mean'))
 
-    data['median'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('median'))
+    data['price_target_median'] = data['symbol'].apply(lambda x : tickers.get(x).analyst_price_targets.get('median'))
 
     data['strongBuy'] = data['symbol'].apply(lambda x: tickers.get(x).recommendations_summary.iloc[0]['strongBuy'])
 
@@ -85,11 +86,6 @@ def get_cik_from_symbol(symbol: str) -> str:
                         return str(item['cik_str']).zfill(10)
                     
         url = f"https://www.sec.gov/files/company_tickers.json"
-        headers = {
-            'User-Agent': 'Ahmed Fadlalla (ahmedmaaf@gmail.com)',
-            'Accept-Encoding': 'gzip, deflate',
-            'Host': 'data.sec.gov'
-        }
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
@@ -129,23 +125,13 @@ def get_company_submission(cik: str) -> dict:
                 with open(file_path, 'r') as file:
                     return json.load(file)
 
-        # The SEC EDGAR API URL for company submissions
         url = f"https://data.sec.gov/submissions/CIK{cik}.json"
 
-        headers = {
-            'User-Agent': 'Your Name (your.email@example.com)',
-            'Accept-Encoding': 'gzip, deflate',
-            'Host': 'data.sec.gov'
-        }
-
-        # Make the API request
         response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Raise an error for bad status codes
+        response.raise_for_status()
 
-        # Parse the JSON response
         submissions = response.json()
 
-        # Save the data to a file
         with open(file_path, 'w') as file:
             json.dump(submissions, file, indent=4)
 
@@ -181,12 +167,6 @@ def get_company_facts(cik: str, symbol: str) -> dict:
                     return json.load(file)
 
         url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-        
-        headers = {
-            'User-Agent': 'Ahmed Fadlalla (ahmedmaaf@gmail.com)',
-            'Accept-Encoding': 'gzip, deflate',
-            'Host': 'data.sec.gov'
-        }
 
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -468,7 +448,7 @@ def get_news_content(link: str) -> str:
     except Exception as e:
         return f"An unexpected error occurred: {e}"
 
-def get_income_stmt(tickers: dict, indicators: list = None) -> pd.DataFrame:
+def get_indicators(tickers: dict, attribute: str, indicators: list = None) -> pd.DataFrame:
     """
     Extracts and organizes cash flow data for multiple stock tickers into a pandas DataFrame.
 
@@ -478,74 +458,30 @@ def get_income_stmt(tickers: dict, indicators: list = None) -> pd.DataFrame:
     """
     import numpy as np
 
-    stocks_cash_flow = {"symbol": [], "year": []}
+    stock_data = {"symbol": [], "year": []}
     for idx, (symbol, ticker) in enumerate(tickers.items()):
-        cash_flow = ticker.income_stmt
-        stocks_cash_flow["year"].append(cash_flow.columns[0])
+        cash_flow = getattr(ticker, attribute)
+        stock_data["year"].append(cash_flow.columns[0])
         cash_flow = cash_flow[cash_flow.columns[0]]
-        stocks_cash_flow["symbol"].append(symbol)
+        stock_data["symbol"].append(symbol)
         for indicator, val in cash_flow.items():
-            if indicator not in stocks_cash_flow.keys():
-                stocks_cash_flow[indicator] = [val] if idx == 0 else [np.nan] * idx
+            if indicator not in stock_data.keys():
+                stock_data[indicator] = [val] if idx == 0 else [np.nan] * idx
                 if idx != 0:
-                    stocks_cash_flow[indicator].append(val)
+                    stock_data[indicator].append(val)
             else:
-                if len(stocks_cash_flow[indicator]) != idx:
-                    padding = [np.nan] * (idx - len(stocks_cash_flow[indicator]))
-                    stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + [np.nan]
-                    stocks_cash_flow[indicator].append(val)
+                if len(stock_data[indicator]) != idx:
+                    padding = [np.nan] * (idx - len(stock_data[indicator]))
+                    stock_data[indicator] = stock_data[indicator] + [np.nan]
+                    stock_data[indicator].append(val)
                 else:
-                    stocks_cash_flow[indicator].append(val)
+                    stock_data[indicator].append(val)
 
-    for indicator in stocks_cash_flow.keys():
-        if len(stocks_cash_flow[indicator]) != len(tickers.keys()):
-            padding = [np.nan] * (len(tickers.keys()) - len(stocks_cash_flow[indicator]))
-            stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + padding
-    df = pd.DataFrame(stocks_cash_flow)
-
-    if indicators:
-        drops = []
-        for column in df.columns:
-            if column not in indicators:
-                drops.append(column)
-        df = df.drop(drops, axis=1)
-
-    return df
-
-def get_cash_flow(tickers: dict, indicators: list = None) -> pd.DataFrame:
-    """
-    Extracts and organizes cash flow data for multiple stock tickers into a pandas DataFrame.
-
-    This function processes cash flow data for various indicators, aligning them for all provided tickers. 
-    Missing values for some indicators in specific tickers are padded with NaN. Additionally, the function 
-    supports filtering to include only specified indicators.
-    """
-    import numpy as np
-
-    stocks_cash_flow = {"symbol": [], "year": []}
-    for idx, (symbol, ticker) in enumerate(tickers.items()):
-        cash_flow = ticker.cash_flow
-        stocks_cash_flow["year"].append(cash_flow.columns[0])
-        cash_flow = cash_flow[cash_flow.columns[0]]
-        stocks_cash_flow["symbol"].append(symbol)
-        for indicator, val in cash_flow.items():
-            if indicator not in stocks_cash_flow.keys():
-                stocks_cash_flow[indicator] = [val] if idx == 0 else [np.nan] * idx
-                if idx != 0:
-                    stocks_cash_flow[indicator].append(val)
-            else:
-                if len(stocks_cash_flow[indicator]) != idx:
-                    padding = [np.nan] * (idx - len(stocks_cash_flow[indicator]))
-                    stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + [np.nan]
-                    stocks_cash_flow[indicator].append(val)
-                else:
-                    stocks_cash_flow[indicator].append(val)
-
-    for indicator in stocks_cash_flow.keys():
-        if len(stocks_cash_flow[indicator]) != len(tickers.keys()):
-            padding = [np.nan] * (len(tickers.keys()) - len(stocks_cash_flow[indicator]))
-            stocks_cash_flow[indicator] = stocks_cash_flow[indicator] + padding
-    df = pd.DataFrame(stocks_cash_flow)
+    for indicator in stock_data.keys():
+        if len(stock_data[indicator]) != len(tickers.keys()):
+            padding = [np.nan] * (len(tickers.keys()) - len(stock_data[indicator]))
+            stock_data[indicator] = stock_data[indicator] + padding
+    df = pd.DataFrame(stock_data)
 
     if indicators:
         drops = []
