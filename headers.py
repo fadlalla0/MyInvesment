@@ -1,5 +1,5 @@
 headers = {
-    'User-Agent': 'Ahmed Fadlalla (ahmedmaaf@gmail.com)',
+    'User-Agent': 'Your Name (youremail@example.com)',
     'Accept-Encoding': 'gzip, deflate',
     'Host': 'data.sec.gov'
 }
